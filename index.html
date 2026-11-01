@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>CHUTE</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none;touch-action:none;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#fff;
+    user-select:none;-webkit-user-select:none}
+  canvas{display:block}
+  #hud{position:fixed;top:18px;left:22px;right:22px;display:flex;justify-content:space-between;
+    pointer-events:none;font-size:10px;letter-spacing:.2em;text-transform:uppercase}
+  #left,#right{display:flex;gap:28px}
+  .stat{display:flex;flex-direction:column;gap:4px}
+  #right .stat{align-items:flex-end}
+  .stat b{font-size:22px;font-weight:300;letter-spacing:.05em}
+  .stat span{opacity:.4}
+  #msg{position:fixed;left:0;right:0;top:34%;text-align:center;pointer-events:none;font-size:72px;
+    font-weight:200;letter-spacing:.35em;text-indent:.35em;opacity:0}
+  #msg.small{font-size:28px;letter-spacing:.5em;text-indent:.5em;color:#999}
+  #msg.show{animation:pop 1.3s ease-out forwards}
+  @keyframes pop{0%{opacity:0;transform:scale(.8)}12%{opacity:1;transform:scale(1.06)}
+    25%{transform:scale(1)}75%{opacity:1}100%{opacity:0;transform:scale(1.04)}}
+  #speed{position:fixed;left:0;right:0;bottom:62px;text-align:center;font-size:13px;
+    letter-spacing:.3em;opacity:0;transition:opacity .4s;pointer-events:none}
+  #hint{position:fixed;left:0;right:0;bottom:20px;text-align:center;font-size:10px;
+    letter-spacing:.25em;text-transform:uppercase;opacity:.3;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="left">
+    <div class="stat"><span>Goles</span><b id="g">0</b></div>
+    <div class="stat"><span>Intentos</span><b id="a">0</b></div>
+    <div class="stat"><span>Acierto</span><b id="pc">–</b></div>
+  </div>
+  <div id="right">
+    <div class="stat"><span>Racha</span><b id="st">0</b></div>
+    <div class="stat"><span>Mejor racha</span><b id="bs">0</b></div>
+    <div class="stat"><span>Tiro máx</span><b id="km">–</b></div>
+  </div>
+</div>
+<div id="msg"></div>
+<div id="speed"></div>
+<div id="hint">mueve el ratón para chutar · mantén clic = potencia · R = reiniciar balón</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(()=>{
+'use strict';
+
+/* ===== AJUSTES (toca estos números para cambiar la sensación) ===== */
+const GW=9, GH=3, GZ=-18, GD=2.6, BR=0.3;      // portería: ancho, alto, posición, fondo | radio balón
+const GRAV=14, DRAG=0.12, BOUNCE=0.58, ROLL=0.7; // gravedad, aire, bote, rodadura
+const KICK_E=0.5, LIFT=0.28, MAXV=34;            // elasticidad del chute, elevación, velocidad máx. balón
+const BOOT_K=9,  BOOT_V=20;                      // bota: reactividad y velocidad máx.
+const POW_K=20,  POW_V=28;                       // ídem con clic mantenido (potencia)
+
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const $=id=>document.getElementById(id);
+function load(k){try{return localStorage.getItem('chute_'+k)}catch(e){return null}}
+function save(k,v){try{localStorage.setItem('chute_'+k,v)}catch(e){}}
+
+/* ===== ESCENA ===== */
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0x000000);
+document.body.appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+scene.fog=new THREE.Fog(0x000000,22,70);
+const camera=new THREE.PerspectiveCamera(52,innerWidth/innerHeight,0.1,200);
+const camBase=new THREE.Vector3(0,5.2,8.5);
+const look=new THREE.Vector3(0,0.8,-9);
+
+scene.add(new THREE.AmbientLight(0xffffff,0.6));
+const sun=new THREE.DirectionalLight(0xffffff,0.9);
+sun.position.set(4,10,6); scene.add(sun);
+
+/* Suelo + cuadrícula sandbox */
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(300,300),new THREE.MeshBasicMaterial({color:0x1a1a1a}));
+ground.rotation.x=-Math.PI/2; scene.add(ground);
+const grid=new THREE.GridHelper(120,120,0x363636,0x282828);
+grid.position.y=0.005; scene.add(grid);
+
+/* Marcas de campo (solo líneas blancas) */
+const lineMat=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.55});
+function poly(pts,close){
+  const g=new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(p[0],0.02,p[1])));
+  scene.add(close?new THREE.LineLoop(g,lineMat):new THREE.Line(g,lineMat));
+}
+poly([[-16,GZ],[16,GZ]]);
+poly([[-7,GZ],[-7,GZ+4],[7,GZ+4],[7,GZ]]);
+poly([[-12,GZ],[-12,GZ+11],[12,GZ+11],[12,GZ]]);
+const ring=[]; for(let i=0;i<48;i++){const a=i/48*Math.PI*2;ring.push([Math.cos(a)*0.55,Math.sin(a)*0.55]);}
+poly(ring,true);
+
+/* ===== PORTERÍA ===== */
+const frameMat=new THREE.MeshStandardMaterial({color:0xffffff,emissive:0x777777,roughness:.4});
+function bar(r,h,x,y,z,rz){
+  const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,12),frameMat);
+  m.position.set(x,y,z); m.rotation.z=rz||0; scene.add(m);
+}
+bar(0.08,GH,-GW/2,GH/2,GZ); bar(0.08,GH,GW/2,GH/2,GZ);
+bar(0.08,GW+0.16,0,GH,GZ,Math.PI/2);
+bar(0.035,GW,0,GH,GZ-GD,Math.PI/2);
+
+const netMat=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.28});
+function makeNet(o,u,v,nu,nv){
+  const V=[],idx=[];
+  for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++)
+    V.push([o[0]+u[0]*i/nu+v[0]*j/nv,o[1]+u[1]*i/nu+v[1]*j/nv,o[2]+u[2]*i/nu+v[2]*j/nv]);
+  const id=(i,j)=>j*(nu+1)+i;
+  for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++){
+    if(i<nu)idx.push(id(i,j),id(i+1,j));
+    if(j<nv)idx.push(id(i,j),id(i,j+1));
+  }
+  const pos=new Float32Array(idx.length*3);
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  const lines=new THREE.LineSegments(geo,netMat); lines.frustumCulled=false; scene.add(lines);
+  function update(disp){
+    for(let k=0;k<idx.length;k++){
+      const p=V[idx[k]], d=disp?disp(p):[0,0,0];
+      pos[k*3]=p[0]+d[0]; pos[k*3+1]=p[1]+d[1]; pos[k*3+2]=p[2]+d[2];
+    }
+    geo.attributes.position.needsUpdate=true;
+  }
+  update();
+  return {update};
+}
+const netBack=makeNet([-GW/2,0,GZ-GD],[GW,0,0],[0,GH,0],18,8);
+makeNet([-GW/2,0,GZ],[0,0,-GD],[0,GH,0],5,8);
+makeNet([ GW/2,0,GZ],[0,0,-GD],[0,GH,0],5,8);
+makeNet([-GW/2,GH,GZ],[GW,0,0],[0,0,-GD],18,5);
+
+let ripple=null;
+function disp(p){
+  if(!ripple)return [0,0,0];
+  const dx=p[0]-ripple.x, dy=p[1]-ripple.y;
+  const env=Math.exp(-(dx*dx+dy*dy)/2.5)*Math.exp(-ripple.t*1.8);
+  const edge=clamp(Math.min((p[0]+GW/2)/0.8,(GW/2-p[0])/0.8,(GH-p[1])/0.6,p[1]/0.6),0,1);
+  return [0,0,-ripple.amp*env*edge*Math.cos(ripple.t*13)];
+}
+
+/* ===== BALÓN ===== */
+const ballMesh=new THREE.Mesh(
+  new THREE.IcosahedronGeometry(BR,1),
+  new THREE.MeshStandardMaterial({color:0xffffff,roughness:.45,flatShading:true}));
+ballMesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(ballMesh.geometry),
+  new THREE.LineBasicMaterial({color:0x000000,transparent:true,opacity:.5})));
+scene.add(ballMesh);
+const ball={p:new THREE.Vector3(0,BR,0),v:new THREE.Vector3(),s:0};
+
+/* ===== BOTA (sin jugador) ===== */
+const bootG=new THREE.Group(); bootG.rotation.order='YXZ'; scene.add(bootG);
+const mOr=new THREE.MeshStandardMaterial({color:0xff6a00,roughness:.5,emissive:0x2a1100});
+const mWh=new THREE.MeshStandardMaterial({color:0xeeeeee,roughness:.6});
+const mDk=new THREE.MeshStandardMaterial({color:0x1a1a1a,roughness:.8});
+function part(geo,mat,x,y,z,sx,sy,sz){
+  const m=new THREE.Mesh(geo,mat); m.position.set(x,y,z);
+  if(sx)m.scale.set(sx,sy,sz); bootG.add(m); return m;
+}
+part(new THREE.BoxGeometry(0.36,0.08,1.0),mWh,0,0.06,-0.02);
+part(new THREE.SphereGeometry(0.2,20,14),mOr,0,0.2,-0.22,0.95,0.8,1.7);
+part(new THREE.BoxGeometry(0.34,0.26,0.32),mOr,0,0.22,0.28);
+part(new THREE.CylinderGeometry(0.15,0.17,0.75,16),mDk,0,0.62,0.3).rotation.x=0.15;
+[[-.1,-.4],[.1,-.4],[-.1,.3],[.1,.3]].forEach(([x,z])=>
+  part(new THREE.CylinderGeometry(0.03,0.04,0.06,8),mDk,x,0.035,z));
+const boot={x:0,z:4,tx:0,tz:4,vx:0,vz:0,yaw:0};
+let bl=0; // elevación de la bota
+
+/* ===== SOMBRAS ===== */
+function blobTex(){
+  const c=document.createElement('canvas'); c.width=c.height=64;
+  const g=c.getContext('2d'), gr=g.createRadialGradient(32,32,0,32,32,32);
+  gr.addColorStop(0,'rgba(0,0,0,.85)'); gr.addColorStop(1,'rgba(0,0,0,0)');
+  g.fillStyle=gr; g.fillRect(0,0,64,64); return new THREE.CanvasTexture(c);
+}
+const bt=blobTex();
+function blob(size){
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(size,size),
+    new THREE.MeshBasicMaterial({map:bt,transparent:true,depthWrite:false}));
+  m.rotation.x=-Math.PI/2; m.position.y=0.03; scene.add(m); return m;
+}
+const ballShadow=blob(1.5), bootShadow=blob(2.4);
+
+/* ===== ESTELA DEL BALÓN ===== */
+const TN=26, trailPos=new Float32Array(TN*3), trailCol=new Float32Array(TN*3);
+const trailGeo=new THREE.BufferGeometry();
+trailGeo.setAttribute('position',new THREE.BufferAttribute(trailPos,3));
+trailGeo.setAttribute('color',new THREE.BufferAttribute(trailCol,3));
+const trail=new THREE.Line(trailGeo,new THREE.LineBasicMaterial({
+  vertexColors:true,blending:THREE.AdditiveBlending,transparent:true,depthWrite:false}));
+trail.frustumCulled=false; scene.add(trail);
+function trailReset(){for(let i=0;i<TN;i++){trailPos[i*3]=ball.p.x;trailPos[i*3+1]=ball.p.y;trailPos[i*3+2]=ball.p.z;}}
+
+/* ===== PARTÍCULAS ===== */
+const PN=280, pPos=new Float32Array(PN*3), pCol=new Float32Array(PN*3),
+      pVel=new Float32Array(PN*3), pLife=new Float32Array(PN);
+const pGeo=new THREE.BufferGeometry();
+pGeo.setAttribute('position',new THREE.BufferAttribute(pPos,3));
+pGeo.setAttribute('color',new THREE.BufferAttribute(pCol,3));
+const pts=new THREE.Points(pGeo,new THREE.PointsMaterial({size:0.16,vertexColors:true,
+  transparent:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+pts.frustumCulled=false; scene.add(pts);
+let pc=0;
+function burst(x,y,z,n,spd){
+  for(let i=0;i<n;i++){
+    const k=pc++%PN, a=Math.random()*Math.PI*2, b=Math.random()*Math.PI-Math.PI/2,
+          s=spd*(0.3+Math.random()*0.7);
+    pPos[k*3]=x;pPos[k*3+1]=y;pPos[k*3+2]=z;
+    pVel[k*3]=Math.cos(a)*Math.cos(b)*s;
+    pVel[k*3+1]=Math.abs(Math.sin(b))*s+2;
+    pVel[k*3+2]=Math.sin(a)*Math.cos(b)*s;
+    pLife[k]=1;
+  }
+}
+function updParticles(dt){
+  for(let k=0;k<PN;k++){
+    if(pLife[k]<=0){pCol[k*3]=pCol[k*3+1]=pCol[k*3+2]=0;continue;}
+    pLife[k]-=dt*0.75;
+    pVel[k*3+1]-=10*dt;
+    pPos[k*3]+=pVel[k*3]*dt; pPos[k*3+1]+=pVel[k*3+1]*dt; pPos[k*3+2]+=pVel[k*3+2]*dt;
+    if(pPos[k*3+1]<0.05){pPos[k*3+1]=0.05;pVel[k*3+1]*=-0.4;}
+    const l=Math.max(pLife[k],0), f=l*l;
+    pCol[k*3]=f; pCol[k*3+1]=(0.5+0.4*l)*f; pCol[k*3+2]=(0.15+0.3*l)*f;
+  }
+  pGeo.attributes.position.needsUpdate=true; pGeo.attributes.color.needsUpdate=true;
+}
+
+/* ===== SONIDO (WebAudio, sin archivos) ===== */
+let AC,noiseBuf;
+function audioInit(){
+  if(!AC){
+    try{
+      AC=new (window.AudioContext||window.webkitAudioContext)();
+      const n=AC.sampleRate*0.3; noiseBuf=AC.createBuffer(1,n,AC.sampleRate);
+      const d=noiseBuf.getChannelData(0); for(let i=0;i<n;i++)d[i]=Math.random()*2-1;
+    }catch(e){}
+  }
+  if(AC&&AC.state==='suspended')AC.resume();
+}
+function tone(f,dur,type,vol,f2,delay){
+  if(!AC)return;
+  const t=AC.currentTime+(delay||0), o=AC.createOscillator(), g=AC.createGain();
+  o.type=type; o.frequency.setValueAtTime(f,t);
+  if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+dur);
+  g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t+dur+0.02);
+}
+function noise(dur,freq,vol,type){
+  if(!AC)return;
+  const t=AC.currentTime, s=AC.createBufferSource(), f=AC.createBiquadFilter(), g=AC.createGain();
+  s.buffer=noiseBuf; f.type=type||'lowpass'; f.frequency.value=freq;
+  g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  s.connect(f); f.connect(g); g.connect(AC.destination); s.start(t); s.stop(t+dur+0.01);
+}
+const thump=p=>{tone(160+p*60,.18,'sine',.5+.4*p,40); noise(.12,500+p*2500,.1+.35*p);};
+const bounceSnd=vy=>{if(vy>2)tone(150,.1,'sine',Math.min(vy/12,.5)*.4,70);};
+const postSnd=p=>{const v=Math.min(.15+p/30,.45);tone(880,.45,'sine',v);tone(1760,.25,'triangle',v*.4);};
+const goalSnd=()=>{[523,659,784,1047].forEach((f,i)=>tone(f,.55,'triangle',.22,0,i*.08));noise(.5,900,.25,'bandpass');};
+
+/* ===== ENTRADA ===== */
+const mouse={x:0,y:0,down:false,has:false};
+function setPointer(e){mouse.x=e.clientX/innerWidth*2-1;mouse.y=-(e.clientY/innerHeight*2-1);mouse.has=true;}
+addEventListener('pointermove',setPointer);
+addEventListener('pointerdown',e=>{audioInit();setPointer(e);mouse.down=true;});
+addEventListener('pointerup',()=>mouse.down=false);
+addEventListener('blur',()=>mouse.down=false);
+addEventListener('keydown',e=>{if(e.key==='r'||e.key==='R'||e.code==='Space'){audioInit();resetBall();}});
+
+const ray=new THREE.Raycaster(), plane=new THREE.Plane(new THREE.Vector3(0,1,0),0), hit=new THREE.Vector3();
+function updateTarget(){
+  if(!mouse.has)return;
+  ray.setFromCamera({x:mouse.x,y:mouse.y},camera);
+  if(ray.ray.intersectPlane(plane,hit)){boot.tx=clamp(hit.x,-12,12);boot.tz=clamp(hit.z,-15,7);}
+  else boot.tz=-15;
+}
+
+/* ===== ESTADO DE JUEGO ===== */
+let state='ready',stateT=0,touched=false,counted=false,scored=false,flightT=0,restT=0,kickCD=0;
+let goals=0,attempts=0,streak=0,best=+load('best')||0,maxKmh=+load('kmh')||0;
+let slow=0,timeScale=1,shake=0,kickedFlag=false;
+let speedTimer;
+
+function hud(){
+  $('g').textContent=goals; $('a').textContent=attempts;
+  $('pc').textContent=attempts?Math.round(goals/attempts*100)+'%':'–';
+  $('st').textContent=streak; $('bs').textContent=best;
+  $('km').textContent=maxKmh?maxKmh+' km/h':'–';
+}
+function showMsg(t,small){
+  const m=$('msg'); m.textContent=t; m.className=''; void m.offsetWidth;
+  m.className='show'+(small?' small':'');
+}
+function showSpeed(kmh,record){
+  const s=$('speed'); s.textContent=kmh+' km/h'+(record?'  ·  récord':'');
+  s.style.opacity=1; clearTimeout(speedTimer); speedTimer=setTimeout(()=>s.style.opacity=0,1500);
+}
+function resetBall(){
+  ball.p.set(0,BR,0); ball.v.set(0,0,0); ball.s=0; ballMesh.quaternion.identity();
+  state='ready'; stateT=0; touched=counted=scored=false; flightT=restT=0; ripple=null;
+  netBack.update(); trailReset();
+}
+function goal(){
+  scored=true; state='scored'; stateT=0; goals++; streak++;
+  if(streak>best){best=streak;save('best',best);}
+  slow=0.9; shake=Math.max(shake,0.5);
+  burst(ball.p.x,ball.p.y,GZ,150,7);
+  goalSnd(); showMsg('GOL'); hud();
+}
+function miss(){
+  if(state!=='flying')return;
+  state='missed'; stateT=0; streak=0; showMsg('FALLO',true); hud();
+}
+function postHit(power){
+  postSnd(power); shake=Math.max(shake,Math.min(power*0.01,0.3));
+  if(state==='flying'&&power>5)showMsg('PALO',true);
+}
+
+/* ===== FÍSICA ===== */
+function stepBall(h){
+  const p=ball.p,v=ball.v;
+  v.y-=GRAV*h; v.multiplyScalar(Math.exp(-DRAG*h));
+  const pz=p.z;
+  p.x+=v.x*h; p.y+=v.y*h; p.z+=v.z*h;
+
+  if(p.y<BR){
+    p.y=BR;
+    if(v.y<-1.5){bounceSnd(-v.y);v.y=-v.y*BOUNCE;v.x*=0.96;v.z*=0.96;} else v.y=0;
+    const f=Math.exp(-ROLL*h); v.x*=f; v.z*=f;
+    if(v.x*v.x+v.z*v.z<0.02){v.x=0;v.z=0;}
+  }
+
+  // palos
+  for(const sx of [-1,1]){
+    const px=sx*GW/2;
+    if(p.y<GH){
+      let dx=p.x-px,dz=p.z-GZ; const d=Math.hypot(dx,dz),R=BR+0.08;
+      if(d<R&&d>1e-4){
+        dx/=d;dz/=d; p.x=px+dx*R; p.z=GZ+dz*R;
+        const vn=v.x*dx+v.z*dz;
+        if(vn<0){v.x-=1.6*vn*dx;v.z-=1.6*vn*dz;postHit(-vn);}
+      }
+    }
+  }
+  // larguero
+  if(Math.abs(p.x)<GW/2+0.08){
+    let dy=p.y-GH,dz=p.z-GZ; const d=Math.hypot(dy,dz),R=BR+0.08;
+    if(d<R&&d>1e-4){
+      dy/=d;dz/=d; p.y=GH+dy*R; p.z=GZ+dz*R;
+      const vn=v.y*dy+v.z*dz;
+      if(vn<0){v.y-=1.6*vn*dy;v.z-=1.6*vn*dz;postHit(-vn);}
+    }
+  }
+  // cruce de la línea de gol
+  if(state==='flying'&&!scored&&pz>=GZ&&p.z<GZ){
+    if(Math.abs(p.x)<GW/2-0.05&&p.y<GH-0.05)goal(); else miss();
+  }
+  // dentro de la red
+  if(scored&&p.z<GZ){
+    v.multiplyScalar(Math.exp(-1.2*h));
+    const hw=GW/2-BR*0.9;
+    if(p.x>hw){p.x=hw;v.x*=-0.3;} if(p.x<-hw){p.x=-hw;v.x*=-0.3;}
+    if(p.y>GH-BR){p.y=GH-BR;v.y*=-0.3;}
+    const zb=GZ-GD+BR;
+    if(p.z<zb){
+      const imp=-v.z; p.z=zb; v.z*=-0.18;
+      if(imp>2){ripple={x:p.x,y:p.y,t:0,amp:Math.min(imp*0.05,0.9)};noise(.35,700,Math.min(imp/30,.35),'bandpass');}
+    }
+  }
+}
+
+function collide(bx,bz,tx,tz){
+  const p=ball.p,v=ball.v;
+  const sp=[[bx,0.3+bl,bz,0.4],[bx+tx*0.42,0.28+bl,bz+tz*0.42,0.3]];
+  for(const s of sp){
+    let dx=p.x-s[0],dy=p.y-s[1],dz=p.z-s[2];
+    const d=Math.hypot(dx,dy,dz),R=s[3]+BR;
+    if(d<R&&d>1e-5){
+      dx/=d;dy/=d;dz/=d;
+      p.x=s[0]+dx*R; p.y=Math.max(BR,s[1]+dy*R); p.z=s[2]+dz*R;
+      const rv=(v.x-boot.vx)*dx+v.y*dy+(v.z-boot.vz)*dz;
+      if(rv<0){
+        const j=-(1+KICK_E)*rv;
+        v.x+=dx*j; v.y+=dy*j; v.z+=dz*j;
+        if(-rv>1.5&&kickCD<=0){
+          kickCD=0.15;
+          v.y+=Math.min(Math.hypot(boot.vx,boot.vz)*LIFT,9);
+          const pw=-rv;
+          thump(Math.min(pw/25,1));
+          shake=Math.max(shake,Math.min(pw*0.012,0.35));
+          burst(p.x,p.y,p.z,8+(pw|0),2+pw*0.15);
+          kickedFlag=true; touched=true;
+        }
+      }
+      const m=v.length(); if(m>MAXV)v.multiplyScalar(MAXV/m);
+    }
+  }
+}
+
+/* ===== BUCLE ===== */
+function easeOutBack(t){const c1=1.70158,c3=c1+1;return 1+c3*Math.pow(t-1,3)+c1*Math.pow(t-1,2);}
+let last=performance.now();
+
+function frame(now){
+  requestAnimationFrame(frame);
+  const rdt=Math.min((now-last)/1000,0.05); last=now; if(rdt<=0)return;
+  if(slow>0){slow-=rdt;timeScale=0.3;} else timeScale+=(1-timeScale)*Math.min(1,rdt*5);
+  const dt=rdt*timeScale;
+
+  // cámara (base) y puntero sobre el suelo
+  camera.position.copy(camBase); camera.position.x+=boot.x*0.1;
+  look.x+=(ball.p.x*0.3-look.x)*Math.min(1,rdt*3);
+  camera.lookAt(look); camera.updateMatrixWorld();
+  updateTarget();
+
+  // bota: persigue al ratón con velocidad limitada
+  const k=mouse.down?POW_K:BOOT_K, vmax=mouse.down?POW_V:BOOT_V;
+  let sx=(boot.tx-boot.x)*(1-Math.exp(-k*dt)), sz=(boot.tz-boot.z)*(1-Math.exp(-k*dt));
+  const sl=Math.hypot(sx,sz), maxS=vmax*dt;
+  if(sl>maxS){sx*=maxS/sl;sz*=maxS/sl;}
+  const ox=boot.x,oz=boot.z;
+  boot.vx=sx/dt; boot.vz=sz/dt;
+  const bsp=Math.hypot(boot.vx,boot.vz);
+
+  // orientación de la bota
+  if(bsp>2){
+    const ddx=boot.vx, ddz=Math.min(boot.vz,-Math.abs(boot.vx)*0.2-0.01);
+    let da=Math.atan2(-ddx,-ddz)-boot.yaw; da=Math.atan2(Math.sin(da),Math.cos(da));
+    boot.yaw+=da*Math.min(1,dt*12);
+  } else boot.yaw*=Math.exp(-dt*4);
+  const tdx=-Math.sin(boot.yaw), tdz=-Math.cos(boot.yaw);
+  bl+=(Math.min(bsp*0.012,0.25)-bl)*Math.min(1,dt*15);
+
+  // simulación en subpasos
+  kickCD-=dt; kickedFlag=false;
+  const N=4;
+  for(let i=1;i<=N;i++){
+    const bx=ox+sx*i/N, bz=oz+sz*i/N;
+    stepBall(dt/N);
+    if(ball.s>0.6)collide(bx,bz,tdx,tdz);
+  }
+  boot.x=ox+sx; boot.z=oz+sz;
+
+  // primer chute: cuenta intento
+  if(kickedFlag&&!counted&&state==='ready'&&ball.v.length()>3){
+    counted=true; attempts++; state='flying'; flightT=restT=0;
+    const kmh=Math.round(ball.v.length()*3.6), rec=kmh>maxKmh;
+    if(rec){maxKmh=kmh;save('kmh',kmh);}
+    showSpeed(kmh,rec); hud();
+  }
+
+  // reglas
+  const spd=ball.v.length(), grounded=ball.p.y<=BR+0.03;
+  if(state==='flying'){
+    flightT+=rdt; restT=(spd<0.35&&grounded)?restT+rdt:0;
+    if(restT>0.8||flightT>8||Math.abs(ball.p.x)>20||ball.p.z>14||ball.p.z<GZ-8)miss();
+  } else if(state==='ready'){
+    if(touched){
+      restT=(spd<0.35&&grounded)?restT+rdt:0;
+      if(restT>1.0||Math.abs(ball.p.x)>20||ball.p.z>14||ball.p.z<-30)resetBall();
+    }
+  } else if(state==='scored'){ stateT+=rdt; if(stateT>2.2)resetBall(); }
+  else if(state==='missed'){ stateT+=rdt; if(stateT>1.1)resetBall(); }
+
+  // red
+  if(ripple){ripple.t+=dt;netBack.update(disp);if(ripple.t>3.2){ripple=null;netBack.update();}}
+
+  // dibujar balón
+  if(ball.s<1)ball.s=Math.min(1,ball.s+rdt*3.5);
+  ballMesh.position.copy(ball.p);
+  ballMesh.scale.setScalar(Math.max(easeOutBack(ball.s),0.001));
+  const hv=Math.hypot(ball.v.x,ball.v.z);
+  if(hv>0.05){
+    const ax=new THREE.Vector3(ball.v.z,0,-ball.v.x).normalize();
+    ballMesh.rotateOnWorldAxis(ax,hv*dt/BR);
+  }
+  ballShadow.position.set(ball.p.x,0.03,ball.p.z);
+  const bsc=ball.s/(1+ball.p.y*0.35); ballShadow.scale.set(bsc,bsc,1);
+  ballShadow.material.opacity=Math.max(0.15,1-ball.p.y*0.18);
+
+  // dibujar bota
+  bootG.position.set(boot.x,bl,boot.z);
+  bootG.rotation.set(Math.min(bsp*0.015,0.3),boot.yaw,0);
+  mOr.emissive.setHex(mouse.down?0x883300:0x2a1100);
+  bootShadow.position.set(boot.x+tdx*0.1,0.03,boot.z+tdz*0.1);
+
+  // estela
+  for(let i=TN-1;i>0;i--){
+    trailPos[i*3]=trailPos[(i-1)*3];trailPos[i*3+1]=trailPos[(i-1)*3+1];trailPos[i*3+2]=trailPos[(i-1)*3+2];
+  }
+  trailPos[0]=ball.p.x;trailPos[1]=ball.p.y;trailPos[2]=ball.p.z;
+  const inten=clamp((spd-5)/15,0,1);
+  for(let i=0;i<TN;i++){
+    const f=Math.pow(1-i/TN,1.6)*inten;
+    trailCol[i*3]=f;trailCol[i*3+1]=f*0.75;trailCol[i*3+2]=f*0.45;
+  }
+  trailGeo.attributes.position.needsUpdate=true; trailGeo.attributes.color.needsUpdate=true;
+
+  updParticles(dt);
+
+  // temblor de cámara
+  if(shake>0.002){
+    camera.position.x+=(Math.random()-.5)*shake; camera.position.y+=(Math.random()-.5)*shake;
+    shake*=Math.exp(-8*rdt);
+  } else shake=0;
+
+  renderer.render(scene,camera);
+}
+
+function resize(){
+  const a=innerWidth/innerHeight;
+  renderer.setSize(innerWidth,innerHeight);
+  camera.aspect=a;
+  camBase.set(0,5.2+(a<1?(1/a-1)*2.5:0),8.5+(a<1?(1/a-1)*7:0));
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize',resize); resize();
+
+hud(); resetBall();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
