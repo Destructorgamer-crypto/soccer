@@ -5,18 +5,22 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
 <title>CHUTE</title>
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none;touch-action:none;
-    font-family:ui-monospace,Menlo,Consolas,monospace;color:#fff;user-select:none;-webkit-user-select:none}
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:ui-monospace,Menlo,Consolas,monospace;
+    color:#fff;user-select:none;-webkit-user-select:none}
   canvas{display:block}
-  #goles{position:fixed;top:18px;left:22px;font-size:10px;letter-spacing:.2em;text-transform:uppercase;opacity:.6}
-  #goles b{display:block;margin-top:4px;font-size:22px;font-weight:300}
-  #hint{position:fixed;left:0;right:0;bottom:16px;text-align:center;font-size:10px;
-    letter-spacing:.25em;text-transform:uppercase;opacity:.3}
+  .t{position:fixed;left:0;right:0;text-align:center;text-transform:uppercase;letter-spacing:.25em;pointer-events:none}
+  #g{position:fixed;top:18px;left:22px;font-size:10px;letter-spacing:.2em;text-transform:uppercase;opacity:.6}
+  #g b{display:block;margin-top:4px;font-size:22px;font-weight:300}
+  #hint{bottom:16px;font-size:10px;line-height:1.9;opacity:.3}
+  #lock{top:42%;font-size:14px;opacity:.85}
+  #rep{top:22px;font-size:12px;color:#ff6a00;display:none}
 </style>
 </head>
 <body>
-<div id="goles">Goles<b id="g">0</b></div>
-<div id="hint">ratón = mover la bota · mantén clic = levantar el balón · R = reiniciar</div>
+<div id="g">Goles<b id="gn">0</b></div>
+<div id="rep" class="t">Repetición · espacio para saltar</div>
+<div id="lock" class="t">clic para jugar</div>
+<div id="hint" class="t">ratón = mirar · WASD = moverte · shift = correr<br>mantén clic y arrastra = mover la bota (adelante = chutar, más rápido = más alto) · R = reiniciar balón</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -24,50 +28,43 @@
 'use strict';
 
 /* ===== AJUSTES ===== */
-const GW=9, GH=3, GZ=-20, GD=2.5, BR=0.22;   // portería (ancho, alto, posición, fondo) y radio del balón
-const GRAV=15, DRAG=0.1, BOUNCE=0.6, ROLL=0.6;
-const BOOT_K=14, BOOT_V=26, MAXV=42;         // reactividad y velocidad máx. de la bota / balón
-const KICK_E=0.5;                            // rebote del chute
-const LIFT=0.12, LIFT_UP=0.6;                // elevación normal y con clic mantenido
-const SONIDO=true;
-
+const GW=7.32, GH=2.44, GZ=-22, GD=2, BR=0.14;  // portería (medidas reales) y radio del balón
+const G=9.81, K_AIR=0.015;                      // gravedad y rozamiento del aire
+const E_GROUND=0.62, F_GROUND=0.9, ROLL=1.0;    // bote, fricción al botar y frenado rodando
+const E_KICK=0.55, MR=0.9, BOOT_V=16, MAXV=32;  // elasticidad del chute, transferencia, vel. máx. bota y balón
+const LIFT=0.4;                                 // cuánto sube el balón con un golpe fuerte
+const SENS=0.0025, EYE=1.7, REST_LX=0.2, REST_FD=1.4;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const $=id=>document.getElementById(id);
 
 /* ===== ESCENA ===== */
 const renderer=new THREE.WebGLRenderer({antialias:true});
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.setSize(innerWidth,innerHeight);
 document.body.appendChild(renderer.domElement);
+const cv=renderer.domElement;
 
 const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x000000);
-scene.fog=new THREE.Fog(0x000000,25,80);
-
-// Primera persona: tú estás en (0, 1.7, 5) mirando hacia la portería
-const CAM_Z=5;
-const camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,0.05,200);
-camera.position.set(0,1.7,CAM_Z);
-camera.rotation.x=-0.35;
+scene.background=new THREE.Color(0);
+scene.fog=new THREE.Fog(0,25,90);
+const camera=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.05,200);
+camera.rotation.order='YXZ';
 
 scene.add(new THREE.AmbientLight(0xffffff,0.65));
-const sun=new THREE.DirectionalLight(0xffffff,0.8);
-sun.position.set(4,10,6); scene.add(sun);
+const sun=new THREE.DirectionalLight(0xffffff,0.8); sun.position.set(4,10,6); scene.add(sun);
 
-// Suelo + cuadrícula
 const ground=new THREE.Mesh(new THREE.PlaneGeometry(400,400),new THREE.MeshBasicMaterial({color:0x1a1a1a}));
 ground.rotation.x=-Math.PI/2; scene.add(ground);
-const grid=new THREE.GridHelper(200,200,0x363636,0x282828);
-grid.position.y=0.005; scene.add(grid);
+const grid=new THREE.GridHelper(200,200,0x363636,0x282828); grid.position.y=0.005; scene.add(grid);
 
-// Marcas blancas
 const lineMat=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.55});
 function poly(pts,close){
   const g=new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(p[0],0.02,p[1])));
   scene.add(close?new THREE.LineLoop(g,lineMat):new THREE.Line(g,lineMat));
 }
-poly([[-16,GZ],[16,GZ]]);
-poly([[-7,GZ],[-7,GZ+4],[7,GZ+4],[7,GZ]]);
-const ring=[]; for(let i=0;i<40;i++){const a=i/40*Math.PI*2;ring.push([Math.cos(a)*0.5,Math.sin(a)*0.5]);}
+poly([[-20,GZ],[20,GZ]]);
+poly([[-7,GZ],[-7,GZ+5],[7,GZ+5],[7,GZ]]);
+const ring=[]; for(let i=0;i<40;i++){const a=i/40*Math.PI*2;ring.push([Math.cos(a)*0.4,Math.sin(a)*0.4]);}
 poly(ring,true);
 
 /* ===== PORTERÍA ===== */
@@ -76,33 +73,26 @@ function bar(r,h,x,y,z,rz){
   const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,12),frameMat);
   m.position.set(x,y,z); m.rotation.z=rz||0; scene.add(m);
 }
-bar(0.08,GH,-GW/2,GH/2,GZ); bar(0.08,GH,GW/2,GH/2,GZ);
-bar(0.08,GW+0.16,0,GH,GZ,Math.PI/2);
-
+bar(0.06,GH,-GW/2,GH/2,GZ); bar(0.06,GH,GW/2,GH/2,GZ); bar(0.06,GW+0.12,0,GH,GZ,Math.PI/2);
 const netMat=new THREE.LineBasicMaterial({color:0xffffff,transparent:true,opacity:0.25});
 function net(o,u,v,nu,nv){
-  const pts=[], P=(i,j)=>new THREE.Vector3(
-    o[0]+u[0]*i/nu+v[0]*j/nv, o[1]+u[1]*i/nu+v[1]*j/nv, o[2]+u[2]*i/nu+v[2]*j/nv);
-  for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++){
-    if(i<nu)pts.push(P(i,j),P(i+1,j));
-    if(j<nv)pts.push(P(i,j),P(i,j+1));
-  }
+  const pts=[],P=(i,j)=>new THREE.Vector3(o[0]+u[0]*i/nu+v[0]*j/nv,o[1]+u[1]*i/nu+v[1]*j/nv,o[2]+u[2]*i/nu+v[2]*j/nv);
+  for(let j=0;j<=nv;j++)for(let i=0;i<=nu;i++){if(i<nu)pts.push(P(i,j),P(i+1,j));if(j<nv)pts.push(P(i,j),P(i,j+1));}
   scene.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts),netMat));
 }
-net([-GW/2,0,GZ-GD],[GW,0,0],[0,GH,0],18,8);          // fondo
-net([-GW/2,0,GZ],[0,0,-GD],[0,GH,0],5,8);             // lateral izq.
-net([ GW/2,0,GZ],[0,0,-GD],[0,GH,0],5,8);             // lateral der.
-net([-GW/2,GH,GZ],[GW,0,0],[0,0,-GD],18,5);           // techo
+net([-GW/2,0,GZ-GD],[GW,0,0],[0,GH,0],18,8);
+net([-GW/2,0,GZ],[0,0,-GD],[0,GH,0],5,8);
+net([ GW/2,0,GZ],[0,0,-GD],[0,GH,0],5,8);
+net([-GW/2,GH,GZ],[GW,0,0],[0,0,-GD],18,5);
 
 /* ===== BALÓN ===== */
 const ballMesh=new THREE.Mesh(new THREE.IcosahedronGeometry(BR,1),
   new THREE.MeshStandardMaterial({color:0xffffff,roughness:.45,flatShading:true}));
 ballMesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(ballMesh.geometry),
-  new THREE.LineBasicMaterial({color:0x000000,transparent:true,opacity:.5})));
+  new THREE.LineBasicMaterial({color:0,transparent:true,opacity:.5})));
 scene.add(ballMesh);
 const ball={p:new THREE.Vector3(0,BR,0),v:new THREE.Vector3()};
 
-// Sombra simple (para ver la altura del balón)
 const sc=document.createElement('canvas'); sc.width=sc.height=64;
 {const g=sc.getContext('2d'),gr=g.createRadialGradient(32,32,0,32,32,32);
  gr.addColorStop(0,'rgba(0,0,0,.9)');gr.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=gr;g.fillRect(0,0,64,64);}
@@ -110,108 +100,93 @@ const shadow=new THREE.Mesh(new THREE.PlaneGeometry(1,1),
   new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(sc),transparent:true,depthWrite:false}));
 shadow.rotation.x=-Math.PI/2; shadow.position.y=0.03; scene.add(shadow);
 
-/* ===== BOTA (pequeña, siempre mirando a la portería) ===== */
-const bootG=new THREE.Group(); scene.add(bootG);
+/* ===== BOTA ===== */
+const bootG=new THREE.Group(); bootG.rotation.order='YXZ'; scene.add(bootG);
 const mOr=new THREE.MeshStandardMaterial({color:0xff6a00,roughness:.5,emissive:0x2a1100});
 const mWh=new THREE.MeshStandardMaterial({color:0xeeeeee,roughness:.6});
 const mDk=new THREE.MeshStandardMaterial({color:0x1a1a1a,roughness:.8});
-function part(geo,mat,x,y,z,sx,sy,sz){
-  const m=new THREE.Mesh(geo,mat); m.position.set(x,y,z);
-  if(sx)m.scale.set(sx,sy,sz); bootG.add(m); return m;
-}
-part(new THREE.BoxGeometry(0.15,0.04,0.4),mWh,0,0.02,-0.05);
-part(new THREE.SphereGeometry(0.1,16,12),mOr,0,0.1,-0.14,1,0.8,1.5);
-part(new THREE.BoxGeometry(0.14,0.12,0.14),mOr,0,0.1,0.08);
-part(new THREE.CylinderGeometry(0.06,0.07,0.35,12),mDk,0,0.3,0.08);
-const boot={x:0,z:CAM_Z-3,tx:0,tz:CAM_Z-3,vx:0,vz:0};
-let bl=0; // 0..1 → punta levantada
+function part(geo,mat,x,y,z,sx,sy,sz){const m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);if(sx)m.scale.set(sx,sy,sz);bootG.add(m);}
+part(new THREE.BoxGeometry(0.1,0.03,0.3),mWh,0,0.015,0);
+part(new THREE.SphereGeometry(0.055,14,10),mOr,0,0.065,-0.12,1,0.8,1.5);
+part(new THREE.BoxGeometry(0.1,0.08,0.14),mOr,0,0.07,0.05);
+part(new THREE.CylinderGeometry(0.045,0.05,0.25,12),mDk,0,0.2,0.1);
 
 /* ===== SONIDO ===== */
 let AC;
-function audioInit(){
-  if(!SONIDO)return;
-  try{ if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)(); if(AC.state==='suspended')AC.resume(); }catch(e){}
-}
+function audioInit(){try{if(!AC)AC=new (window.AudioContext||window.webkitAudioContext)();if(AC.state==='suspended')AC.resume();}catch(e){}}
 function thump(p){
   if(!AC)return;
   const t=AC.currentTime,o=AC.createOscillator(),g=AC.createGain();
-  o.frequency.setValueAtTime(170,t); o.frequency.exponentialRampToValueAtTime(45,t+0.15);
-  g.gain.setValueAtTime(0.15+0.5*p,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.17);
+  o.frequency.setValueAtTime(170,t);o.frequency.exponentialRampToValueAtTime(45,t+0.15);
+  g.gain.setValueAtTime(0.15+0.5*p,t);g.gain.exponentialRampToValueAtTime(0.0001,t+0.17);
   o.connect(g);g.connect(AC.destination);o.start(t);o.stop(t+0.2);
 }
 
-/* ===== ENTRADA ===== */
-const mouse={x:0,y:-0.5,down:false,has:false};
-function setPointer(e){mouse.x=e.clientX/innerWidth*2-1;mouse.y=-(e.clientY/innerHeight*2-1);mouse.has=true;}
-addEventListener('pointermove',setPointer);
-addEventListener('pointerdown',e=>{audioInit();setPointer(e);mouse.down=true;});
-addEventListener('pointerup',()=>mouse.down=false);
-addEventListener('blur',()=>mouse.down=false);
-addEventListener('keydown',e=>{if(e.key==='r'||e.key==='R'){audioInit();resetBall();}});
-
-const ray=new THREE.Raycaster(), plane=new THREE.Plane(new THREE.Vector3(0,1,0),0), hit=new THREE.Vector3();
-function updateTarget(){
-  if(!mouse.has)return;
-  camera.updateMatrixWorld();
-  ray.setFromCamera({x:mouse.x,y:mouse.y},camera);
-  let tx,tz;
-  if(ray.ray.intersectPlane(plane,hit)){tx=hit.x;tz=hit.z;}
-  else{ // el cursor apunta al cielo: bota lo más lejos posible
-    const d=ray.ray.direction, h=Math.hypot(d.x,d.z)||1;
-    tx=camera.position.x+d.x/h*16; tz=camera.position.z+d.z/h*16;
-  }
-  boot.tx=clamp(tx,-10,10);
-  boot.tz=clamp(tz,CAM_Z-16,CAM_Z-1.8);
-}
-
 /* ===== ESTADO ===== */
-let goals=0, scored=false, inGoal=false, kickCD=0;
-function resetBall(){
-  ball.p.set(0,BR,0); ball.v.set(0,0,0); ballMesh.quaternion.identity();
-  scored=false; inGoal=false;
-}
+const P={x:0,z:3,vx:0,vz:0,yaw:0,pitch:-0.4};
+const B={lx:REST_LX,fd:REST_FD,tlx:REST_LX,tfd:REST_FD,tilt:0};
+const keys={};
+let mode='live', locked=false, drag=false;
+let goals=0, scored=false, replayed=false, gt=0, goalT=0, lastKickT=-9, simT=0, kickCD=0;
+let rec=[], rp=null;
+
+/* ===== ENTRADA ===== */
+cv.addEventListener('mousedown',e=>{
+  audioInit();
+  if(document.pointerLockElement!==cv){cv.requestPointerLock();return;}
+  if(e.button===0&&mode==='live'){drag=true;B.tlx=B.lx;B.tfd=B.fd;}
+});
+addEventListener('mouseup',()=>drag=false);
+document.addEventListener('pointerlockchange',()=>{
+  locked=document.pointerLockElement===cv; $('lock').style.display=locked?'none':'block'; if(!locked)drag=false;
+});
+addEventListener('mousemove',e=>{
+  if(!locked||mode!=='live')return;
+  const dx=e.movementX||0,dy=e.movementY||0; if(Math.abs(dx)>300||Math.abs(dy)>300)return;
+  if(drag){B.tlx=clamp(B.tlx+dx*0.004,-1,1);B.tfd=clamp(B.tfd-dy*0.011,0.6,2.8);}
+  else{P.yaw-=dx*SENS;P.pitch=clamp(P.pitch-dy*SENS,-1.3,0.6);}
+});
+addEventListener('keydown',e=>{
+  keys[e.code]=true;
+  if(e.code==='Space'){e.preventDefault();if(mode==='replay')endReplay();}
+  if(e.code==='KeyR')resetBall();
+});
+addEventListener('keyup',e=>keys[e.code]=false);
+addEventListener('blur',()=>{drag=false;for(const k in keys)keys[k]=false;});
 
 /* ===== FÍSICA ===== */
+function resetBall(){
+  ball.p.set(0,BR,0);ball.v.set(0,0,0);ballMesh.quaternion.identity();
+  scored=false;replayed=false;gt=0;lastKickT=-9;
+  if(mode==='replay')endReplay();
+}
 function stepBall(h){
   const p=ball.p,v=ball.v;
-  v.y-=GRAV*h; v.multiplyScalar(Math.exp(-DRAG*h));
+  v.y-=G*h; v.multiplyScalar(1/(1+K_AIR*v.length()*h));   // arrastre cuadrático
   const pz=p.z;
-  p.x+=v.x*h; p.y+=v.y*h; p.z+=v.z*h;
+  p.x+=v.x*h;p.y+=v.y*h;p.z+=v.z*h;
 
   if(p.y<BR){
     p.y=BR;
-    if(v.y<-1.5){v.y=-v.y*BOUNCE;v.x*=0.96;v.z*=0.96;} else v.y=0;
+    if(v.y<-1){v.y=-v.y*E_GROUND;v.x*=F_GROUND;v.z*=F_GROUND;} else v.y=0;
   }
-  if(p.y<=BR+0.001){
-    const f=Math.exp(-ROLL*h); v.x*=f; v.z*=f;
-    if(v.x*v.x+v.z*v.z<0.02){v.x=0;v.z=0;}
+  if(p.y<=BR+0.002&&v.y<0.3){                              // rodando
+    const hs=Math.hypot(v.x,v.z);
+    if(hs>0){const n=Math.max(0,hs-(ROLL+0.12*hs)*h)/hs;v.x*=n;v.z*=n;}
   }
-
-  // palos
-  if(p.y<GH) for(const sx of [-1,1]){
-    const px=sx*GW/2; let dx=p.x-px,dz=p.z-GZ; const d=Math.hypot(dx,dz),R=BR+0.08;
-    if(d<R&&d>1e-4){
-      dx/=d;dz/=d; p.x=px+dx*R; p.z=GZ+dz*R;
-      const vn=v.x*dx+v.z*dz;
-      if(vn<0){v.x-=1.6*vn*dx;v.z-=1.6*vn*dz;}
-    }
+  const R=BR+0.06;
+  if(p.y<GH) for(const s of [-1,1]){                      // palos
+    const px=s*GW/2; let dx=p.x-px,dz=p.z-GZ;const d=Math.hypot(dx,dz);
+    if(d<R&&d>1e-4){dx/=d;dz/=d;p.x=px+dx*R;p.z=GZ+dz*R;const vn=v.x*dx+v.z*dz;if(vn<0){v.x-=1.5*vn*dx;v.z-=1.5*vn*dz;}}
   }
-  // larguero
-  if(Math.abs(p.x)<GW/2+0.08){
-    let dy=p.y-GH,dz=p.z-GZ; const d=Math.hypot(dy,dz),R=BR+0.08;
-    if(d<R&&d>1e-4){
-      dy/=d;dz/=d; p.y=GH+dy*R; p.z=GZ+dz*R;
-      const vn=v.y*dy+v.z*dz;
-      if(vn<0){v.y-=1.6*vn*dy;v.z-=1.6*vn*dz;}
-    }
+  if(Math.abs(p.x)<GW/2+0.06){                            // larguero
+    let dy=p.y-GH,dz=p.z-GZ;const d=Math.hypot(dy,dz);
+    if(d<R&&d>1e-4){dy/=d;dz/=d;p.y=GH+dy*R;p.z=GZ+dz*R;const vn=v.y*dy+v.z*dz;if(vn<0){v.y-=1.5*vn*dy;v.z-=1.5*vn*dz;}}
   }
-  // gol
-  if(!scored&&pz>=GZ&&p.z<GZ&&Math.abs(p.x)<GW/2-0.05&&p.y<GH-0.05){
-    scored=true; inGoal=true; goals++;
-    document.getElementById('g').textContent=goals;
+  if(!scored&&pz>=GZ&&p.z<GZ&&Math.abs(p.x)<GW/2-0.05&&p.y<GH-0.05){   // gol
+    scored=true;goals++;$('gn').textContent=goals;goalT=simT;gt=0;
   }
-  // dentro de la red
-  if(inGoal&&p.z<GZ){
+  if(scored&&p.z<GZ){                                      // dentro de la red
     v.multiplyScalar(Math.exp(-1.2*h));
     const hw=GW/2-BR*0.9;
     if(p.x>hw){p.x=hw;v.x*=-0.3;} if(p.x<-hw){p.x=-hw;v.x*=-0.3;}
@@ -219,83 +194,102 @@ function stepBall(h){
     const zb=GZ-GD+BR; if(p.z<zb){p.z=zb;v.z*=-0.18;}
   }
 }
-
-function collide(bx,bz){
+// colisión esfera (bota o cuerpo) con el balón; devuelve la velocidad de impacto
+function hit(cx,cy,cz,r,wx,wz,tilt){
   const p=ball.p,v=ball.v;
-  const spheres=[
-    [bx, 0.14-0.1*bl, bz-0.16, 0.12],   // punta (baja al levantarla → el balón sube)
-    [bx, 0.18,        bz+0.06, 0.13]    // tobillo
-  ];
-  for(const s of spheres){
-    let dx=p.x-s[0],dy=p.y-s[1],dz=p.z-s[2];
-    const d=Math.hypot(dx,dy,dz),R=s[3]+BR;
-    if(d<R&&d>1e-5){
-      dx/=d;dy/=d;dz/=d;
-      p.x=s[0]+dx*R; p.y=Math.max(BR,s[1]+dy*R); p.z=s[2]+dz*R;
-      const rv=(v.x-boot.vx)*dx+v.y*dy+(v.z-boot.vz)*dz;
-      if(rv<0){
-        const j=-(1+KICK_E)*rv;
-        v.x+=dx*j; v.y+=dy*j; v.z+=dz*j;
-        if(-rv>1.5&&kickCD<=0){
-          kickCD=0.12;
-          v.y+=Math.min(Math.hypot(boot.vx,boot.vz)*(LIFT+LIFT_UP*bl),14);
-          thump(Math.min(-rv/25,1));
-        }
-      }
-      const m=v.length(); if(m>MAXV)v.multiplyScalar(MAXV/m);
-    }
-  }
+  let dx=p.x-cx,dy=p.y-cy,dz=p.z-cz;const d=Math.hypot(dx,dy,dz),R=r+BR;
+  if(d>=R||d<1e-5)return 0;
+  dx/=d;dy/=d;dz/=d;
+  p.x=cx+dx*R;p.y=Math.max(BR,cy+dy*R);p.z=cz+dz*R;
+  let nx=dx,ny=dy+tilt*LIFT,nz=dz;const nl=Math.hypot(nx,ny,nz);nx/=nl;ny/=nl;nz/=nl;  // punta levantada = cuña
+  const rv=(v.x-wx)*nx+v.y*ny+(v.z-wz)*nz;
+  if(rv>=0)return 0;
+  const j=-(1+E_KICK)*MR*rv;
+  v.x+=nx*j;v.y+=ny*j;v.z+=nz*j;
+  const m=v.length();if(m>MAXV)v.multiplyScalar(MAXV/m);
+  return -rv;
 }
+
+/* ===== REPETICIÓN ===== */
+function apply(s){
+  camera.position.set(s.px,EYE,s.pz);camera.rotation.set(s.pitch,s.yaw,0);
+  bootG.position.set(s.bx,0,s.bz);bootG.rotation.set(s.tilt*0.5,s.yaw,0);
+  ballMesh.position.set(s.x,s.y,s.z);ballMesh.quaternion.set(s.qx,s.qy,s.qz,s.qw);
+  const sh=1/(1+s.y*0.4);
+  shadow.position.set(s.x,0.03,s.z);shadow.scale.set(sh*0.5,sh*0.5,1);
+}
+function startReplay(){
+  if(!rec.length)return;
+  const t0=Math.max(lastKickT-1,rec[0].t);
+  rp={t:t0,t1:goalT+1.4,i:0};
+  while(rp.i<rec.length-2&&rec[rp.i+1].t<=t0)rp.i++;
+  mode='replay';drag=false;$('rep').style.display='block';
+}
+function playReplay(dt){
+  rp.t+=dt;
+  if(rp.t>=rp.t1){endReplay();return;}
+  while(rp.i<rec.length-2&&rec[rp.i+1].t<=rp.t)rp.i++;
+  apply(rec[rp.i]);
+}
+function endReplay(){mode='live';rp=null;$('rep').style.display='none';}
 
 /* ===== BUCLE ===== */
 let last=performance.now();
 const _ax=new THREE.Vector3();
-
 function frame(now){
   requestAnimationFrame(frame);
-  const dt=Math.min((now-last)/1000,0.033); last=now; if(dt<=0)return;
+  const dt=Math.min((now-last)/1000,0.033);last=now;if(dt<=0)return;
+  if(mode==='replay'){playReplay(dt);renderer.render(scene,camera);return;}
+  simT+=dt;kickCD-=dt;
 
-  updateTarget();
+  // jugador (WASD relativo a hacia dónde miras)
+  const fx=-Math.sin(P.yaw),fz=-Math.cos(P.yaw),rx=Math.cos(P.yaw),rz=-Math.sin(P.yaw);
+  const fw=(keys.KeyW?1:0)-(keys.KeyS?1:0),st=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+  const sp=(keys.ShiftLeft||keys.ShiftRight)?6:3.5;
+  let ix=fx*fw+rx*st,iz=fz*fw+rz*st;const il=Math.hypot(ix,iz);if(il>1){ix/=il;iz/=il;}
+  const a=Math.min(1,dt*10);
+  P.vx+=(ix*sp-P.vx)*a;P.vz+=(iz*sp-P.vz)*a;
+  const px0=P.x,pz0=P.z;
+  P.x=clamp(P.x+P.vx*dt,-45,45);P.z=clamp(P.z+P.vz*dt,-45,45);
 
-  // la bota persigue al ratón con velocidad limitada
-  const k=1-Math.exp(-BOOT_K*dt);
-  let sx=(boot.tx-boot.x)*k, sz=(boot.tz-boot.z)*k;
-  const sl=Math.hypot(sx,sz), maxS=BOOT_V*dt;
-  if(sl>maxS){sx*=maxS/sl;sz*=maxS/sl;}
-  boot.vx=sx/dt; boot.vz=sz/dt;
-  const ox=boot.x,oz=boot.z;
-  bl+=((mouse.down?1:0)-bl)*Math.min(1,dt*20);
-  kickCD-=dt;
+  // bota (posición local respecto al jugador)
+  if(!drag){B.tlx=REST_LX;B.tfd=REST_FD;}
+  const k=1-Math.exp(-18*dt),cap=(drag?BOOT_V:3)*dt;
+  let sl=(B.tlx-B.lx)*k,sf=(B.tfd-B.fd)*k;const m=Math.hypot(sl,sf);if(m>cap){sl*=cap/m;sf*=cap/m;}
+  const lx0=B.lx,fd0=B.fd;B.lx+=sl;B.fd+=sf;
+  B.tilt+=((drag?clamp((sf/dt-5)/14,0,1):0)-B.tilt)*Math.min(1,dt*25);   // más rápido hacia delante = más punta levantada
+  const bw=(lx,fd,x,z)=>[x+rx*lx+fx*fd,z+rz*lx+fz*fd];
+  const [b0x,b0z]=bw(lx0,fd0,px0,pz0),[b1x,b1z]=bw(B.lx,B.fd,P.x,P.z);
+  const wx=(b1x-b0x)/dt,wz=(b1z-b0z)/dt;
 
-  const N=8;
-  for(let i=1;i<=N;i++){
-    stepBall(dt/N);
-    collide(ox+sx*i/N,oz+sz*i/N);
+  // física en subpasos
+  for(let i=1;i<=8;i++){
+    const f=i/8,bx=b0x+(b1x-b0x)*f,bz=b0z+(b1z-b0z)*f,qx=px0+(P.x-px0)*f,qz=pz0+(P.z-pz0)*f;
+    stepBall(dt/8);
+    const h=hit(bx+fx*0.13,0.07,bz+fz*0.13,0.07,wx,wz,B.tilt)||hit(bx,0.09,bz,0.08,wx,wz,B.tilt)||hit(bx-fx*0.1,0.18,bz-fz*0.1,0.08,wx,wz,B.tilt);
+    if(h>2&&kickCD<=0){kickCD=0.1;lastKickT=simT;thump(Math.min(h/18,1));}
+    hit(qx,0.3,qz,0.3,P.vx,P.vz,0);hit(qx,0.9,qz,0.3,P.vx,P.vz,0);   // el cuerpo también empuja
   }
-  boot.x=ox+sx; boot.z=oz+sz;
 
-  // dibujar
-  ballMesh.position.copy(ball.p);
+  // giro visual del balón
   const hv=Math.hypot(ball.v.x,ball.v.z);
-  if(hv>0.05){_ax.set(ball.v.z,0,-ball.v.x).normalize(); ballMesh.rotateOnWorldAxis(_ax,hv*dt/BR);}
-  const sh=1/(1+ball.p.y*0.4);
-  shadow.position.set(ball.p.x,0.03,ball.p.z); shadow.scale.set(1.3*sh,1.3*sh,1);
-  shadow.material.opacity=Math.max(0.2,1-ball.p.y*0.15);
+  if(hv>0.05){_ax.set(ball.v.z,0,-ball.v.x).normalize();ballMesh.rotateOnWorldAxis(_ax,hv*dt/BR);}
 
-  bootG.position.set(boot.x,0,boot.z);
-  bootG.rotation.set(bl*0.5,0,0);
+  // grabar y dibujar
+  const q=ballMesh.quaternion;
+  const s={t:simT,px:P.x,pz:P.z,yaw:P.yaw,pitch:P.pitch,bx:b1x,bz:b1z,tilt:B.tilt,
+           x:ball.p.x,y:ball.p.y,z:ball.p.z,qx:q.x,qy:q.y,qz:q.z,qw:q.w};
+  rec.push(s);if(rec.length>1500)rec.shift();
+  apply(s);
+
+  // repetición 1,6 s después del gol
+  if(scored&&!replayed){gt+=dt;if(gt>1.6){replayed=true;startReplay();}}
 
   renderer.render(scene,camera);
 }
 
-function resize(){
-  renderer.setSize(innerWidth,innerHeight);
-  camera.aspect=innerWidth/innerHeight;
-  camera.updateProjectionMatrix();
-}
-addEventListener('resize',resize); resize();
-
-resetBall();
+function resize(){renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();}
+addEventListener('resize',resize);resize();
 requestAnimationFrame(frame);
 })();
 </script>
