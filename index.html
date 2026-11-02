@@ -20,7 +20,7 @@
 <div id="g">Goles<b id="gn">0</b></div>
 <div id="rep" class="t">Repetición · espacio para saltar</div>
 <div id="lock" class="t">clic para jugar</div>
-<div id="hint" class="t">ratón = mirar · WASD = moverte · shift = correr<br>mantén clic y arrastra = mover la bota (adelante = chutar, más rápido = más alto) · R = reiniciar balón</div>
+<div id="hint" class="t">la cámara siempre mira al balón · WASD = moverte · shift = correr<br>ratón = mover la bota (adelante = chutar, más rápido = más alto) · M = balón delante de ti · R = reiniciar</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -33,7 +33,9 @@ const G=9.81, K_AIR=0.015;                      // gravedad y rozamiento del air
 const E_GROUND=0.62, F_GROUND=0.9, ROLL=1.0;    // bote, fricción al botar y frenado rodando
 const E_KICK=0.55, MR=0.9, BOOT_V=16, MAXV=32;  // elasticidad del chute, transferencia, vel. máx. bota y balón
 const LIFT=0.4;                                 // cuánto sube el balón con un golpe fuerte
-const SENS=0.0025, EYE=1.7, REST_LX=0.2, REST_FD=1.4;
+const CAM_K=7;                                  // rapidez con la que la cámara sigue al balón
+const SPAWN_D=2.2;                              // distancia a la que aparece el balón con M
+const EYE=1.7, REST_LX=0.2, REST_FD=1.4;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const $=id=>document.getElementById(id);
 
@@ -126,39 +128,39 @@ function thump(p){
 const P={x:0,z:3,vx:0,vz:0,yaw:0,pitch:-0.4};
 const B={lx:REST_LX,fd:REST_FD,tlx:REST_LX,tfd:REST_FD,tilt:0};
 const keys={};
-let mode='live', locked=false, drag=false;
+let mode='live', locked=false, idle=0;
 let goals=0, scored=false, replayed=false, gt=0, goalT=0, lastKickT=-9, simT=0, kickCD=0;
 let rec=[], rp=null;
 
 /* ===== ENTRADA ===== */
-cv.addEventListener('mousedown',e=>{
+cv.addEventListener('mousedown',()=>{
   audioInit();
-  if(document.pointerLockElement!==cv){cv.requestPointerLock();return;}
-  if(e.button===0&&mode==='live'){drag=true;B.tlx=B.lx;B.tfd=B.fd;}
+  if(document.pointerLockElement!==cv)cv.requestPointerLock();
 });
-addEventListener('mouseup',()=>drag=false);
 document.addEventListener('pointerlockchange',()=>{
-  locked=document.pointerLockElement===cv; $('lock').style.display=locked?'none':'block'; if(!locked)drag=false;
+  locked=document.pointerLockElement===cv; $('lock').style.display=locked?'none':'block';
 });
-addEventListener('mousemove',e=>{
+addEventListener('mousemove',e=>{            // el ratón mueve la bota (la cámara ya no depende de él)
   if(!locked||mode!=='live')return;
   const dx=e.movementX||0,dy=e.movementY||0; if(Math.abs(dx)>300||Math.abs(dy)>300)return;
-  if(drag){B.tlx=clamp(B.tlx+dx*0.004,-1,1);B.tfd=clamp(B.tfd-dy*0.011,0.6,2.8);}
-  else{P.yaw-=dx*SENS;P.pitch=clamp(P.pitch-dy*SENS,-1.3,0.6);}
+  B.tlx=clamp(B.tlx+dx*0.004,-1,1);
+  B.tfd=clamp(B.tfd-dy*0.011,0.6,2.8);
+  idle=0.35;
 });
 addEventListener('keydown',e=>{
   keys[e.code]=true;
   if(e.code==='Space'){e.preventDefault();if(mode==='replay')endReplay();}
-  if(e.code==='KeyR')resetBall();
+  if(e.code==='KeyR')placeBall(0,0);
+  if(e.code==='KeyM')placeBall(P.x-Math.sin(P.yaw)*SPAWN_D,P.z-Math.cos(P.yaw)*SPAWN_D);
 });
 addEventListener('keyup',e=>keys[e.code]=false);
-addEventListener('blur',()=>{drag=false;for(const k in keys)keys[k]=false;});
+addEventListener('blur',()=>{for(const k in keys)keys[k]=false;});
 
 /* ===== FÍSICA ===== */
-function resetBall(){
-  ball.p.set(0,BR,0);ball.v.set(0,0,0);ballMesh.quaternion.identity();
-  scored=false;replayed=false;gt=0;lastKickT=-9;
+function placeBall(x,z){
   if(mode==='replay')endReplay();
+  ball.p.set(x,BR,z);ball.v.set(0,0,0);ballMesh.quaternion.identity();
+  scored=false;replayed=false;gt=0;lastKickT=-9;
 }
 function stepBall(h){
   const p=ball.p,v=ball.v;
@@ -223,7 +225,7 @@ function startReplay(){
   const t0=Math.max(lastKickT-1,rec[0].t);
   rp={t:t0,t1:goalT+1.4,i:0};
   while(rp.i<rec.length-2&&rec[rp.i+1].t<=t0)rp.i++;
-  mode='replay';drag=false;$('rep').style.display='block';
+  mode='replay';$('rep').style.display='block';
 }
 function playReplay(dt){
   rp.t+=dt;
@@ -242,7 +244,18 @@ function frame(now){
   if(mode==='replay'){playReplay(dt);renderer.render(scene,camera);return;}
   simT+=dt;kickCD-=dt;
 
-  // jugador (WASD relativo a hacia dónde miras)
+  // la cámara apunta al balón (suavizada)
+  {
+    const dx=ball.p.x-P.x,dz=ball.p.z-P.z,hd=Math.hypot(dx,dz);
+    if(hd>0.3){
+      let da=Math.atan2(-dx,-dz)-P.yaw;da=Math.atan2(Math.sin(da),Math.cos(da));
+      P.yaw+=da*Math.min(1,dt*CAM_K);
+    }
+    const tp=clamp(Math.atan2(ball.p.y-EYE,Math.max(hd,0.4)),-1.3,0.6);
+    P.pitch+=(tp-P.pitch)*Math.min(1,dt*CAM_K);
+  }
+
+  // jugador (WASD relativo a hacia dónde mira la cámara)
   const fx=-Math.sin(P.yaw),fz=-Math.cos(P.yaw),rx=Math.cos(P.yaw),rz=-Math.sin(P.yaw);
   const fw=(keys.KeyW?1:0)-(keys.KeyS?1:0),st=(keys.KeyD?1:0)-(keys.KeyA?1:0);
   const sp=(keys.ShiftLeft||keys.ShiftRight)?6:3.5;
@@ -252,12 +265,14 @@ function frame(now){
   const px0=P.x,pz0=P.z;
   P.x=clamp(P.x+P.vx*dt,-45,45);P.z=clamp(P.z+P.vz*dt,-45,45);
 
-  // bota (posición local respecto al jugador)
-  if(!drag){B.tlx=REST_LX;B.tfd=REST_FD;}
-  const k=1-Math.exp(-18*dt),cap=(drag?BOOT_V:3)*dt;
+  // bota: sigue al ratón; si no lo mueves, vuelve despacio a su sitio
+  idle-=dt;
+  const moving=idle>0;
+  if(!moving){B.tlx=REST_LX;B.tfd=REST_FD;}
+  const k=1-Math.exp(-18*dt),cap=(moving?BOOT_V:3)*dt;
   let sl=(B.tlx-B.lx)*k,sf=(B.tfd-B.fd)*k;const m=Math.hypot(sl,sf);if(m>cap){sl*=cap/m;sf*=cap/m;}
   const lx0=B.lx,fd0=B.fd;B.lx+=sl;B.fd+=sf;
-  B.tilt+=((drag?clamp((sf/dt-5)/14,0,1):0)-B.tilt)*Math.min(1,dt*25);   // más rápido hacia delante = más punta levantada
+  B.tilt+=((moving?clamp((sf/dt-5)/14,0,1):0)-B.tilt)*Math.min(1,dt*25);   // más rápido hacia delante = más punta levantada
   const bw=(lx,fd,x,z)=>[x+rx*lx+fx*fd,z+rz*lx+fz*fd];
   const [b0x,b0z]=bw(lx0,fd0,px0,pz0),[b1x,b1z]=bw(B.lx,B.fd,P.x,P.z);
   const wx=(b1x-b0x)/dt,wz=(b1z-b0z)/dt;
